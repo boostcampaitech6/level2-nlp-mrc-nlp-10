@@ -20,7 +20,7 @@ from datasets import (
     load_from_disk,
     load_metric,
 )
-from retrieval import SparseRetrieval
+from retrieval import TFIDFRetrieval, BM25Retrieval
 from trainer_qa import QuestionAnsweringTrainer
 from transformers import (
     AutoConfig,
@@ -33,6 +33,8 @@ from transformers import (
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
+
+from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +107,18 @@ def run_sparse_retrieval(
     data_path: str = "../data",
     context_path: str = "wikipedia_documents.json",
 ) -> DatasetDict:
-
-    # Query에 맞는 Passage들을 Retrieval 합니다.
-    retriever = SparseRetrieval(
-        tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
-    )
-    retriever.get_sparse_embedding()
+    print(f"Retrieval Method : {data_args.retrieval_method}")
+    if data_args.retrieval_method == 'TF-IDF':
+        # Query에 맞는 Passage들을 Retrieval 합니다.
+        retriever = TFIDFRetrieval(tokenize_fn=tokenize_fn, 
+                                   data_path=data_path, 
+                                   context_path=context_path)
+        retriever.get_sparse_embedding()
+    
+    elif data_args.retrieval_method == 'BM25':
+        retriever = BM25Retrieval(tokenize_fn=tokenize_fn, 
+                                  data_path=data_path, 
+                                  context_path=context_path)
 
     if data_args.use_faiss:
         retriever.build_faiss(num_clusters=data_args.num_clusters)

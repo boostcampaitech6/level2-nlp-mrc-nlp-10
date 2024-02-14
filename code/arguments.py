@@ -9,19 +9,19 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        default="klue/bert-base",
+        default="monologg/koelectra-base-v3-finetuned-korquad",
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"
         },
     )
     config_name: Optional[str] = field(
-        default=None,
+        default="monologg/koelectra-base-v3-finetuned-korquad",
         metadata={
             "help": "Pretrained config name or path if not the same as model_name"
         },
     )
     tokenizer_name: Optional[str] = field(
-        default=None,
+        default="monologg/koelectra-base-v3-finetuned-korquad",
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
@@ -47,7 +47,7 @@ class DataTrainingArguments:
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
     max_seq_length: int = field(
-        default=384,
+        default=512, #384
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded."
@@ -89,4 +89,8 @@ class DataTrainingArguments:
     )
     use_faiss: bool = field(
         default=False, metadata={"help": "Whether to build with faiss"}
+    )
+
+    retrieval_method: str = field(
+        default='BM25', metadata={'help': "Retriever Method : BM25, TF-IDF"}
     )

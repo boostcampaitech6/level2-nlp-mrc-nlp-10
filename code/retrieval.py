@@ -12,6 +12,7 @@ import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
 from sklearn.feature_extraction.text import TfidfVectorizer
 from tqdm.auto import tqdm
+from rank_bm25 import BM25Okapi
 
 seed = 2024
 random.seed(seed) # python random seed 고정
@@ -26,7 +27,7 @@ def timer(name):
     print(f"[{name}] done in {time.time() - t0:.3f} s")
 
 
-class SparseRetrieval:
+class TFIDFRetrieval:
     def __init__(
         self,
         tokenize_fn,
@@ -265,7 +266,7 @@ class SparseRetrieval:
         return doc_scores, doc_indices
 
     def retrieve_faiss(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
     ) -> Union[Tuple[List, List], pd.DataFrame]:
 
         """
@@ -383,25 +384,77 @@ class SparseRetrieval:
         return D.tolist(), I.tolist()
 
 
+class BM25Retrieval:
+    def __init__(self, 
+                 tokenize_fn, 
+                 data_path: Optional[str] = "../data/", 
+                 context_path: Optional[str] = "wikipedia_documents.json") -> NoReturn:
+
+        self.data_path = data_path
+        self.tokenize_fn = tokenize_fn
+        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+            wiki = json.load(f)
+
+        self.contexts = list(
+            dict.fromkeys([v["text"] for v in wiki.values()])
+            )  # set 은 매번 순서가 바뀌므로
+        print(f"Lengths of unique contexts : {len(self.contexts)}")
+        self.ids = list(range(len(self.contexts)))
+
+        with timer('Tokenizing Context Dataset'):
+            tokenized_contexts = [self.tokenize_fn(context) for context in self.contexts]
+
+        with timer("Ready BM25"):
+            self.bm25 = BM25Okapi(tokenized_contexts)
+
+
+    def retrieve(self, dataset: Dataset, topk: Optional[int] = 1) -> Union[Tuple[List, List], pd.DataFrame]:
+        assert isinstance(dataset, Dataset), "BM25 Retriever input type is only dataset"
+
+        # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
+        total = []
+        with timer("Tokenizing Query Dataset"):
+            tokenized_query = [self.tokenize_fn(query) for query in dataset['question']]
+
+        for idx, example in enumerate(tqdm(dataset, desc="Sparse retrieval: ")):
+            tmp = {
+                # Query와 해당 id를 반환합니다.
+                "question": example["question"],
+                "id": example["id"],
+                # Retrieve한 Passage의 id, context를 반환합니다.
+                "context": " ".join(
+                    self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk)
+                ),
+            }
+            if "context" in example.keys() and "answers" in example.keys():
+                # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
+                tmp["original_context"] = example["context"]
+                tmp["answers"] = example["answers"]
+            total.append(tmp)
+        cqas = pd.DataFrame(total)
+        return cqas
+
+
 if __name__ == "__main__":
 
     import argparse
 
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help=""
+        "--dataset_name", default="../data/train_dataset", metavar="../data/train_dataset", type=str, help=""
     )
     parser.add_argument(
         "--model_name_or_path",
-        metavar="bert-base-multilingual-cased",
+        default="monologg/koelectra-base-v3-finetuned-korquad", 
+        metavar="monologg/koelectra-base-v3-finetuned-korquad",
         type=str,
         help="",
     )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="")
+    parser.add_argument("--data_path", default="../data", metavar="../data", type=str, help="")
     parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help=""
+        "--context_path",  default="wikipedia_documents.json", metavar="wikipedia_documents", type=str, help=""
     )
-    parser.add_argument("--use_faiss", metavar=False, type=bool, help="")
+    parser.add_argument("--use_faiss", default=False, metavar=False, type=bool, help="")
 
     args = parser.parse_args()
 
@@ -420,12 +473,13 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False,)
 
-    retriever = SparseRetrieval(
+    retriever = TFIDFRetrieval(
         tokenize_fn=tokenizer.tokenize,
         data_path=args.data_path,
         context_path=args.context_path,
     )
-
+    retriever.get_sparse_embedding()
+    
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
     if args.use_faiss:
