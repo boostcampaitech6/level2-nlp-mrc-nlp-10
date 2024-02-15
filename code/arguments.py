@@ -9,23 +9,30 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        default="monologg/koelectra-base-v3-finetuned-korquad",
+        default="uomnf97/klue-roberta-finetuned-korquad-v2",
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"
         },
     )
     config_name: Optional[str] = field(
-        default="monologg/koelectra-base-v3-finetuned-korquad",
+        default="uomnf97/klue-roberta-finetuned-korquad-v2",
         metadata={
             "help": "Pretrained config name or path if not the same as model_name"
         },
     )
     tokenizer_name: Optional[str] = field(
+        default="uomnf97/klue-roberta-finetuned-korquad-v2",
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
+    )
+    retrieval_tokenizer_name: Optional[str] = field(
         default="monologg/koelectra-base-v3-finetuned-korquad",
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
+
 
 
 @dataclass
