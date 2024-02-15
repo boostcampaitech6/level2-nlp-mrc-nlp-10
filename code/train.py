@@ -1,3 +1,4 @@
+
 import logging
 import os
 import sys
@@ -48,7 +49,9 @@ def main():
     print(model_args.model_name_or_path)
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
-    # training_args.per_device_train_batch_size = 4
+    training_args.per_device_train_batch_size = 15
+    training_args.per_device_eval_batch_size = 15
+    # training_args.fp16 = True
     # print(training_args.per_device_train_batch_size)
 
     print(f"model is from {model_args.model_name_or_path}")
@@ -66,7 +69,6 @@ def main():
 
     # 모델을 초기화하기 전에 난수를 고정합니다.
     set_seed(training_args.seed)
-
     datasets = load_from_disk(data_args.dataset_name)
     print(datasets)
 
@@ -146,7 +148,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
@@ -238,7 +240,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 

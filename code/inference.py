@@ -20,7 +20,7 @@ from datasets import (
     load_from_disk,
     load_metric,
 )
-from retrieval import SparseRetrieval
+from retrieval import TFIDFRetrieval, BM25Retrieval
 from trainer_qa import QuestionAnsweringTrainer
 from transformers import (
     AutoConfig,
@@ -33,6 +33,8 @@ from transformers import (
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
+
+from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +76,20 @@ def main():
         if model_args.config_name
         else model_args.model_name_or_path,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
+    model_tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name
         if model_args.tokenizer_name
         else model_args.model_name_or_path,
         use_fast=True,
     )
+
+    retrieval_tokenizer = AutoTokenizer.from_pretrained(
+        model_args.retrieval_tokenizer_name
+        if model_args.retrieval_tokenizer_name
+        else model_args.model_name_or_path,
+        use_fast=True,
+    )
+
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -89,12 +99,12 @@ def main():
     # True일 경우 : run passage retrieval
     if data_args.eval_retrieval:
         datasets = run_sparse_retrieval(
-            tokenizer.tokenize, datasets, training_args, data_args,
+            retrieval_tokenizer.tokenize, datasets, training_args, data_args,
         )
 
     # eval or predict mrc model
     if training_args.do_eval or training_args.do_predict:
-        run_mrc(data_args, training_args, model_args, datasets, tokenizer, model)
+        run_mrc(data_args, training_args, model_args, datasets, model_tokenizer, model)
 
 
 def run_sparse_retrieval(
@@ -105,12 +115,18 @@ def run_sparse_retrieval(
     data_path: str = "../data",
     context_path: str = "wikipedia_documents.json",
 ) -> DatasetDict:
-
-    # Query에 맞는 Passage들을 Retrieval 합니다.
-    retriever = SparseRetrieval(
-        tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
-    )
-    retriever.get_sparse_embedding()
+    print(f"Retrieval Method : {data_args.retrieval_method}")
+    if data_args.retrieval_method == 'TF-IDF':
+        # Query에 맞는 Passage들을 Retrieval 합니다.
+        retriever = TFIDFRetrieval(tokenize_fn=tokenize_fn, 
+                                   data_path=data_path, 
+                                   context_path=context_path)
+        retriever.get_sparse_embedding()
+    
+    elif data_args.retrieval_method == 'BM25':
+        retriever = BM25Retrieval(tokenize_fn=tokenize_fn, 
+                                  data_path=data_path, 
+                                  context_path=context_path)
 
     if data_args.use_faiss:
         retriever.build_faiss(num_clusters=data_args.num_clusters)
@@ -188,7 +204,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 

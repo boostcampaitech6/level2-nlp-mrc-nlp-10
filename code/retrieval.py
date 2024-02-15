@@ -12,6 +12,7 @@ import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
 from sklearn.feature_extraction.text import TfidfVectorizer
 from tqdm.auto import tqdm
+from rank_bm25 import BM25Okapi
 
 seed = 2024
 random.seed(seed) # python random seed 고정
@@ -26,7 +27,7 @@ def timer(name):
     print(f"[{name}] done in {time.time() - t0:.3f} s")
 
 
-class SparseRetrieval:
+class TFIDFRetrieval:
     def __init__(
         self,
         tokenize_fn,
@@ -142,7 +143,7 @@ class SparseRetrieval:
             print("Faiss Indexer Saved.")
 
     def retrieve(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1, topk_acc_test: bool = False
     ) -> Union[Tuple[List, List], pd.DataFrame]:
 
         """
@@ -193,9 +194,8 @@ class SparseRetrieval:
                     "question": example["question"],
                     "id": example["id"],
                     # Retrieve한 Passage의 id, context를 반환합니다.
-                    "context": " ".join(
-                        [self.contexts[pid] for pid in doc_indices[idx]]
-                    ),
+                    "context": " ".join([self.contexts[pid] for pid in doc_indices[idx]]) if topk_acc_test == False \
+                        else "[TEST_ACC]".join([self.contexts[pid] for pid in doc_indices[idx]]),
                 }
                 if "context" in example.keys() and "answers" in example.keys():
                     # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
@@ -265,7 +265,7 @@ class SparseRetrieval:
         return doc_scores, doc_indices
 
     def retrieve_faiss(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
     ) -> Union[Tuple[List, List], pd.DataFrame]:
 
         """
@@ -383,25 +383,84 @@ class SparseRetrieval:
         return D.tolist(), I.tolist()
 
 
+class BM25Retrieval:
+    def __init__(self, 
+                 tokenize_fn, 
+                 data_path: Optional[str] = "../data/", 
+                 context_path: Optional[str] = "wikipedia_documents.json") -> NoReturn:
+
+        self.data_path = data_path
+        self.tokenize_fn = tokenize_fn
+        self.tokenized_contexts = None
+        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+            wiki = json.load(f)
+
+        self.contexts = list(
+            dict.fromkeys([v["text"] for v in wiki.values()])
+            )  # set 은 매번 순서가 바뀌므로
+        print(f"Lengths of unique contexts : {len(self.contexts)}")
+        self.ids = list(range(len(self.contexts)))
+
+        with timer('Tokenizing Context Dataset'):
+            self.tokenized_contexts = [self.tokenize_fn(context) for context in self.contexts]
+
+        with timer("Ready BM25"):
+            self.bm25 = BM25Okapi(self.tokenized_contexts)
+
+
+    def retrieve(
+            self, query_or_dataset: Dataset, topk: Optional[int] = 1, topk_acc_test: bool = False
+    ) -> Union[Tuple[List, List], pd.DataFrame]:
+        assert isinstance(query_or_dataset, Dataset), "BM25 Retriever input type is only dataset"
+
+        # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
+        total = []
+        with timer("Tokenizing Query Dataset"):
+            tokenized_query = [self.tokenize_fn(query) for query in query_or_dataset['question']]
+
+        for idx, example in enumerate(tqdm(query_or_dataset, desc="Sparse retrieval: ")):
+            tmp = {
+                # Query와 해당 id를 반환합니다.
+                "question": example["question"],
+                "id": example["id"],
+                # Retrieve한 Passage의 id, context를 반환합니다.
+                "context": " ".join(self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk)) if topk_acc_test == False \
+                    else "[TEST_ACC]".join(self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk)),
+            }
+            if "context" in example.keys() and "answers" in example.keys():
+                # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
+                tmp["original_context"] = example["context"]
+                tmp["answers"] = example["answers"]
+            total.append(tmp)
+        cqas = pd.DataFrame(total)
+        return cqas
+
+
 if __name__ == "__main__":
 
     import argparse
 
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help=""
+        "--dataset_name", default="../data/train_dataset", metavar="../data/train_dataset", type=str, help=""
     )
     parser.add_argument(
         "--model_name_or_path",
-        metavar="bert-base-multilingual-cased",
+        default="monologg/koelectra-base-v3-finetuned-korquad", 
+        metavar="monologg/koelectra-base-v3-finetuned-korquad",
         type=str,
         help="",
     )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="")
+    parser.add_argument("--data_path", default="../data", metavar="../data", type=str, help="")
     parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help=""
+        "--context_path",  default="wikipedia_documents.json", metavar="wikipedia_documents", type=str, help=""
     )
-    parser.add_argument("--use_faiss", metavar=False, type=bool, help="")
+    parser.add_argument("--use_faiss", default=False, metavar=False, type=bool, help="")
+    
+    # Add argparser for Top-k Test
+    parser.add_argument("--topk", default=10, metavar=10, type=int, help='topk')
+    parser.add_argument("--method", default="BM25", metavar="BM25", type=str, help='Retrieval Method, BM25, TF-IDF')
+    parser.add_argument("--test", default=True, metavar=False, type=bool, help='topk acc test')
 
     args = parser.parse_args()
 
@@ -419,13 +478,23 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False,)
+    assert args.method in ['BM25', 'TF-IDF'], "Check retrieval method in ['BM25', 'TF-IDF']"
 
-    retriever = SparseRetrieval(
-        tokenize_fn=tokenizer.tokenize,
-        data_path=args.data_path,
-        context_path=args.context_path,
-    )
+    if args.method == 'TF-IDF':
+        retriever = TFIDFRetrieval(
+            tokenize_fn=tokenizer.tokenize,
+            data_path=args.data_path,
+            context_path=args.context_path,
+        )
+        retriever.get_sparse_embedding()
 
+    elif args.method == 'BM25':
+        retriever = BM25Retrieval(
+            tokenize_fn=tokenizer.tokenize,
+            data_path=args.data_path,
+            context_path=args.context_path
+        )
+    
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
     if args.use_faiss:
@@ -442,13 +511,45 @@ if __name__ == "__main__":
             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
     else:
-        with timer("bulk query by exhaustive search"):
-            df = retriever.retrieve(full_ds)
-            df["correct"] = df["original_context"] == df["context"]
-            print(
-                "correct retrieval result by exhaustive search",
-                df["correct"].sum() / len(df),
-            )
+        if args.test:
+            with timer(f"Testing {args.method} Top-{args.topk} acc"):
+                if args.method == 'TF-IDF':
+                    df = retriever.retrieve(query_or_dataset=full_ds,
+                                            topk = args.topk,
+                                            topk_acc_test=args.test)
+                    
+                    correct_cnt = 0
+                    pbar = tqdm(range(len(df)))
+                    
+                    for i in pbar:
+                        original_context = df.iloc[i, 3]
+                        for retrieval_context in df.iloc[i, 2].split('[TEST_ACC]'):
+                            if original_context == retrieval_context:
+                                correct_cnt += 1
+                                break
+                        pbar.set_description(f'Method:{args.method}, Top-{args.topk} ACC: {correct_cnt/(i+1)}, correct: {correct_cnt}, check: {i+1}')
 
-        with timer("single query by exhaustive search"):
-            scores, indices = retriever.retrieve(query)
+
+                elif args.method == 'BM25':
+                        """BM25Retriever는 시간 효율상 아래와 같은 방법으로 해야 개수에 따른 acc 변화과정을 볼 수 있음."""
+                        tokenized_query = [retriever.tokenize_fn(query) for query in full_ds['question']]
+                        
+                        correct_cnt = 0
+                        pbar = tqdm(zip(tokenized_query, full_ds['context']))
+                        
+                        for i, (query, original_context) in enumerate(pbar):
+                            topn_docs = retriever.bm25.get_top_n(query, retriever.contexts, n=args.topk)
+                            for retrieval_context in topn_docs:
+                                if original_context == retrieval_context:
+                                    correct_cnt += 1
+                                    break
+                            pbar.set_description(f'Top-{args.topk} ACC: {correct_cnt/(i+1)}, correct: {correct_cnt}, check: {i+1}')
+
+
+
+            
+        
+                
+
+            
+
