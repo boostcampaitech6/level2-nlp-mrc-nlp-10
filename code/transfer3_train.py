@@ -152,15 +152,15 @@ def run_mrc(
         context_column_name = "context" if "context" in column_names else column_names[1]
         answer_column_name = "answers" if "answers" in column_names else column_names[2]    
         
-    else:
-        if training_args.do_train:
-            column_names = datasets["train"].column_names
-        else:
-            column_names = datasets["validation"].column_names    
+    # else:
+    #     if training_args.do_train:
+    #         column_names = datasets["train"].column_names
+    #     else:
+    #         column_names = datasets["validation"].column_names    
 
-        question_column_name = "question" if "question" in column_names else column_names[0]
-        context_column_name = "context" if "context" in column_names else column_names[1]
-        answer_column_name = "answers" if "answers" in column_names else column_names[2]    
+    #     question_column_name = "question" if "question" in column_names else column_names[0]
+    #     context_column_name = "context" if "context" in column_names else column_names[1]
+    #     answer_column_name = "answers" if "answers" in column_names else column_names[2]    
     
     
 
@@ -256,11 +256,11 @@ def run_mrc(
             raise ValueError("--do_train requires a train dataset")
         train_dataset = datasets["train"]
         
-        transfer_data['answers'] = transfer_data['answers'].apply(lambda x: eval(x))
+        #transfer_data['answers'] = transfer_data['answers'].apply(lambda x: eval(x))
         transfer_train_data = da.Dataset.from_pandas(transfer_data)
 
         # dataset에서 train feature를 생성합니다.
-        train_dataset = train_dataset.map(
+        train_dataset = transfer_train_data.map(
             prepare_train_features,
             batched=True,
             num_proc=data_args.preprocessing_num_workers,
@@ -607,61 +607,23 @@ def run_mrc(
     # transfer learning    
     if transfer_args.do_transfer:
         
-        training_args.save_steps = 6000
-        
-        trainer = QuestionAnsweringTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=news_train_data if transfer_args.do_transfer else None,
-        eval_dataset=eval_dataset if training_args.do_eval or transfer_args.do_transfer else None,
-        eval_examples=datasets["validation"] if training_args.do_eval or transfer_args.do_transfer else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        post_process_function=post_processing_function,
-        compute_metrics=compute_metrics,
-    )
-        
-        print("1차 pre-training")
-        train_result = trainer.train()
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-
-        metrics = train_result.metrics
-        metrics["train_samples"] = len(transfer_train_data)
-
-        trainer.log_metrics("news_train", metrics)
-        trainer.save_metrics("news_train", metrics)
-        trainer.save_state()
-
-        output_train_file = os.path.join(training_args.output_dir, "train_results.txt")
-
-        with open(output_train_file, "w") as writer:
-            logger.info("***** transfer Train results *****")
-            for key, value in sorted(train_result.metrics.items()):
-                logger.info(f"  {key} = {value}")
-                writer.write(f"{key} = {value}\n")
-
-        # State 저장
-        trainer.state.save_to_json(
-            os.path.join(training_args.output_dir, "trainer_state.json")
-        )
-        
-        if(transfer_args.transferred_output_dir):
-            last_checkpoint, max_seq_length = transfer_check_no_error(
-                                                data_args, training_args, transfer_args, datasets, tokenizer
-                                            )
-            if last_checkpoint is not None:
-                checkpoint = last_checkpoint
-            elif os.path.isdir(model_args.model_name_or_path):
-                checkpoint = model_args.model_name_or_path
-            else:
-                checkpoint = None
+        # if(transfer_args.transferred_output_dir):
+        #     last_checkpoint, max_seq_length = transfer_check_no_error(
+        #                                         data_args, training_args, transfer_args, datasets, tokenizer
+        #                                     )
+        #     if last_checkpoint is not None:
+        #         checkpoint = last_checkpoint
+        #     elif os.path.isdir(model_args.model_name_or_path):
+        #         checkpoint = model_args.model_name_or_path
+        #     else:
+        #         checkpoint = None
                 
-            for para in model.parameters():
-                para.requires_grad = False
+            # for para in model.parameters():
+            #     para.requires_grad = False
             
-            for name, param in model.named_parameters():
-                if name in ['qa_outputs.weight', 'qa_outputs.bias']:
-                    param.requires_grad = True
+            # for name, param in model.named_parameters():
+            #     if name in ['roberta.encoder.layer.23.attention.self.query.weight', 'roberta.encoder.layer.23.attention.self.query.bias', 'roberta.encoder.layer.23.attention.self.key.weight', 'roberta.encoder.layer.23.attention.self.key.bias', 'roberta.encoder.layer.23.attention.self.value.weight', 'roberta.encoder.layer.23.attention.self.value.bias', 'roberta.encoder.layer.23.attention.output.dense.weight', 'roberta.encoder.layer.23.attention.output.dense.bias', 'roberta.encoder.layer.23.attention.output.LayerNorm.weight', 'roberta.encoder.layer.23.attention.output.LayerNorm.bias', 'roberta.encoder.layer.23.intermediate.dense.weight', 'roberta.encoder.layer.23.intermediate.dense.bias', 'roberta.encoder.layer.23.output.dense.weight', 'roberta.encoder.layer.23.output.dense.bias', 'roberta.encoder.layer.23.output.LayerNorm.weight', 'roberta.encoder.layer.23.output.LayerNorm.bias', 'qa_outputs.weight', 'qa_outputs.bias']:
+            #         param.requires_grad = True
             
             training_args.save_steps = 4000    
                 
@@ -678,7 +640,7 @@ def run_mrc(
             )
                 
             print("2차 pre-training")    
-            train_result = trainer.train(resume_from_checkpoint=checkpoint)
+            train_result = trainer.train(resume_from_checkpoint=None)
             trainer.save_model(transfer_args.transferred_output_dir)  # Saves the tokenizer too for easy upload
             
             metrics = train_result.metrics

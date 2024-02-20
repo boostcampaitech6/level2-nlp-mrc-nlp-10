@@ -46,11 +46,11 @@ def main():
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    print(model_args.model_name_or_path)
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
     training_args.per_device_train_batch_size = 15
     training_args.per_device_eval_batch_size = 15
+    training_args.learning_rate = 3e-6
     # training_args.fp16 = True
     # print(training_args.per_device_train_batch_size)
 
@@ -329,7 +329,6 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
-    
     
     # Training
     if training_args.do_train:
