@@ -27,12 +27,20 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     DataCollatorWithPadding,
+    DataCollatorForSeq2Seq,
     EvalPrediction,
     HfArgumentParser,
     TrainingArguments,
+    AutoModelForSeq2SeqLM,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
+
+import collections
+import json
+import os
 
 from rank_bm25 import BM25Okapi
 
@@ -69,32 +77,75 @@ def main():
     datasets = load_from_disk(data_args.dataset_name)
     print(datasets)
 
-    # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
-    # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
-    config = AutoConfig.from_pretrained(
-        model_args.config_name
-        if model_args.config_name
-        else model_args.model_name_or_path,
-    )
-    model_tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name
-        if model_args.tokenizer_name
-        else model_args.model_name_or_path,
-        use_fast=True,
-    )
+    if model_args.use_extraction:
+        # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
+        # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
+        config = AutoConfig.from_pretrained(
+            model_args.config_name
+            if model_args.config_name
+            else model_args.model_name_or_path,
+        )
+        model_tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name
+            if model_args.tokenizer_name
+            else model_args.model_name_or_path,
+            use_fast=True,
+        )
 
-    retrieval_tokenizer = AutoTokenizer.from_pretrained(
-        model_args.retrieval_tokenizer_name
-        if model_args.retrieval_tokenizer_name
-        else model_args.model_name_or_path,
-        use_fast=True,
-    )
+        retrieval_tokenizer = AutoTokenizer.from_pretrained(
+            model_args.retrieval_tokenizer_name
+            if model_args.retrieval_tokenizer_name
+            else model_args.model_name_or_path,
+            use_fast=True,
+        )
 
-    model = AutoModelForQuestionAnswering.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-    )
+        model = AutoModelForQuestionAnswering.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+        )
+    else:
+        output_dir = training_args.output_dir
+        num_train_epochs = training_args.num_train_epochs
+        do_eval = training_args.do_eval
+        do_predict = training_args.do_predict
+        training_args = Seq2SeqTrainingArguments(
+            output_dir=output_dir,
+            do_train=True,
+            do_eval=do_eval,
+            do_predict=do_predict,
+            predict_with_generate=True,
+            num_train_epochs=num_train_epochs,
+            save_strategy='epoch',
+            save_total_limit=2
+        )
+        training_args.predict_with_generate = True
+        
+        # generation model을 불러옵니다.
+        config = AutoConfig.from_pretrained(
+            model_args.model_name_or_path
+            if "train_dataset" in model_args.model_name_or_path
+            else model_args.model_for_generation,
+        )
+        model_tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path
+            if "train_dataset" in model_args.model_name_or_path
+            else model_args.model_for_generation,
+            use_fast=True,
+        )
+        retrieval_tokenizer = AutoTokenizer.from_pretrained(
+            model_args.retrieval_tokenizer_name
+            if model_args.retrieval_tokenizer_name
+            else model_args.model_name_or_path,
+            use_fast=True,
+        )
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_args.model_name_or_path
+            if "train_dataset" in model_args.model_name_or_path
+            else model_args.model_for_generation,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+        )
 
     # True일 경우 : run passage retrieval
     if data_args.eval_retrieval:
@@ -104,7 +155,12 @@ def main():
 
     # eval or predict mrc model
     if training_args.do_eval or training_args.do_predict:
-        run_mrc(data_args, training_args, model_args, datasets, model_tokenizer, model)
+        if model_args.use_extraction:
+            print('...run extraction')
+            run_mrc_extract(data_args, training_args, model_args, datasets, model_tokenizer, model)
+        else:
+            print('...run generation')
+            run_mrc_generate(data_args, training_args, model_args, datasets, model_tokenizer, model)
 
 
 def run_sparse_retrieval(
@@ -167,7 +223,7 @@ def run_sparse_retrieval(
     return datasets
 
 
-def run_mrc(
+def run_mrc_extract(
     data_args: DataTrainingArguments,
     training_args: TrainingArguments,
     model_args: ModelArguments,
@@ -320,6 +376,168 @@ def run_mrc(
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
 
+def run_mrc_generate(
+    data_args: DataTrainingArguments,
+    training_args: TrainingArguments,
+    model_args: ModelArguments,
+    datasets: DatasetDict,
+    tokenizer,
+    model,
+) -> NoReturn:
+
+    # dataset을 전처리합니다.
+    column_names = datasets["validation"].column_names
+
+    max_target_length = 128
+    num_beams = 2
+    
+    # 오류가 있는지 확인합니다.
+    last_checkpoint, max_seq_length = check_no_error(
+        data_args, training_args, datasets, tokenizer
+    )
+
+    # Train, eval preprocessing / 전처리를 진행합니다.
+    def preprocess_function(examples):
+        inputs = [f"question: {q}  context: {c} </s>" for q, c in zip(examples["question"], examples["context"])]
+        targets = None
+        if training_args.do_eval:
+            targets = [f'{a["text"][0]} </s>' for a in examples['answers']]
+        model_inputs = tokenizer(
+            inputs,
+            max_length=max_seq_length,
+            padding="max_length" if data_args.pad_to_max_length else False,
+            truncation=True
+        )
+
+        if targets:
+            # targets(label)을 위해 tokenizer 설정
+            labels = tokenizer(
+                text_target=targets,
+                max_length=max_target_length,
+                padding="max_length" if data_args.pad_to_max_length else False,
+                truncation=True,
+            )
+            model_inputs["labels"] = labels["input_ids"]
+        
+        model_inputs["example_id"] = []
+        for i in range(len(examples["id"])):
+            model_inputs["example_id"].append(examples["id"][i])
+        return model_inputs
+
+    eval_dataset = datasets["validation"]
+
+    # Validation Feature 생성
+    eval_dataset = eval_dataset.map(
+        preprocess_function,
+        batched=True,
+        num_proc=data_args.preprocessing_num_workers,
+        remove_columns=column_names,
+        load_from_cache_file=not data_args.overwrite_cache,
+    )
+
+    # Data collator
+    # flag가 True이면 이미 max length로 padding된 상태입니다.
+    # 그렇지 않다면 data collator에서 padding을 진행해야합니다.
+    label_pad_token_id = tokenizer.pad_token_id
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer, label_pad_token_id=label_pad_token_id, pad_to_multiple_of=8 if training_args.fp16 else None
+    )
+    
+    import nltk
+    nltk.download('punkt')
+
+    # Post-processing:
+    def postprocess_text(preds, labels):
+        """
+        postprocess는 nltk를 이용합니다.
+        Huggingface의 TemplateProcessing을 사용하여
+        정규표현식 기반으로 postprocess를 진행할 수 있지만
+        해당 미션에서는 nltk를 이용하여 간단한 후처리를 진행합니다
+        """
+        preds = [pred.strip() for pred in preds]
+        labels = [label.strip() for label in labels]
+
+        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+        return preds, labels
+
+    metric = load_metric("squad")
+
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        # decoded_labels은 rouge metric을 위한 것이며, f1/em을 구할 때 사용되지 않음
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        # 간단한 post-processing
+        decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+
+        formatted_predictions = [{"id": ex["id"], "prediction_text": decoded_preds[i]} for i, ex in enumerate(datasets["validation"])]
+        references = [{"id": ex["id"], "answers": ex["answers"]} for ex in datasets["validation"]]
+
+        result = metric.compute(predictions=formatted_predictions, references=references)
+        return result
+
+    def save_prediction(example, preds):
+        all_predictions = collections.OrderedDict()
+        
+        preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        preds = [pred.strip() for pred in preds]
+        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+        for i, ex in enumerate(example):
+            all_predictions[ex["id"]] = preds[i]
+        
+        if training_args.output_dir is not None:
+            assert os.path.isdir(training_args.output_dir), f"{training_args.output_dir} is not a directory."
+            prediction_file = os.path.join(training_args.output_dir, "predictions.json")
+        logger.info(f"Saving predictions to {prediction_file}.")
+        with open(prediction_file, "w", encoding="utf-8") as writer:
+            writer.write(
+                json.dumps(all_predictions, indent=4, ensure_ascii=False) + "\n"
+            )
+    
+    print("init trainer...")
+    # Trainer 초기화
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=None,
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+    )
+    
+    logger.info("*** Evaluate ***")
+
+    if training_args.do_predict:
+        predictions = trainer.predict(
+            test_dataset=eval_dataset, 
+            max_length=max_target_length,
+            num_beams=num_beams,
+        )
+        save_prediction(datasets["validation"], predictions.predictions)
+        
+        # predictions.json 은 postprocess_qa_predictions() 호출시 이미 저장됩니다.
+        print(
+            "No metric can be presented because there is no correct answer given. Job done!"
+        )
+
+    if training_args.do_eval:
+        metrics = trainer.evaluate(
+            max_length=max_target_length,
+            num_beams=num_beams,
+            metric_key_prefix="eval",
+        )
+
+        metrics["eval_samples"] = len(eval_dataset)
+
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
 
 if __name__ == "__main__":
     main()
