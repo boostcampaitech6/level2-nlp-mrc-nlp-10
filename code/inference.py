@@ -65,9 +65,9 @@ def main():
 
     # 모델을 초기화하기 전에 난수를 고정합니다.
     set_seed(training_args.seed)
-
+    print("\n!!!DataSet!!!!!")
     datasets = load_from_disk(data_args.dataset_name)
-    print(datasets)
+    print(datasets, "\n!!!DataSet!!!!!")
 
     # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
     # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
@@ -128,6 +128,11 @@ def run_sparse_retrieval(
                                   data_path=data_path, 
                                   context_path=context_path)
 
+    elif data_args.retrieval_method == 'Dense':
+        retriever = DenseRetrieval(data_path=data_path, 
+                                  context_path=context_path,
+                                  pretrained_model_name=model_args.retrieval_tokenizer_name)
+
     if data_args.use_faiss:
         retriever.build_faiss(num_clusters=data_args.num_clusters)
         df = retriever.retrieve_faiss(
@@ -135,9 +140,12 @@ def run_sparse_retrieval(
         )
     else:
         df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
-
+        print("keys")
+        print(f'\n{df.keys()}\n')
+        print()
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
+        print("\n!!!!!!!!!!do_predict!!!!!!!!!!!\n")
         f = Features(
             {
                 "context": Value(dtype="string", id=None),
@@ -187,6 +195,16 @@ def run_mrc(
     # (question|context) 혹은 (context|question)로 세팅 가능합니다.
     pad_on_right = tokenizer.padding_side == "right"
 
+    print("batch_size : ", training_args.per_device_train_batch_size, ' ',training_args.per_device_eval_batch_size)
+
+    ####################################################
+    training_args.per_device_train_batch_size=15
+    training_args.per_device_eval_batch_size=15
+    print("batch_size : ", training_args.per_device_train_batch_size, ' ',training_args.per_device_eval_batch_size)
+    # training_args.fp16 = True
+    # print(training_args.per_device_train_batch_size)
+    ####################################################
+
     # 오류가 있는지 확인합니다.
     last_checkpoint, max_seq_length = check_no_error(
         data_args, training_args, datasets, tokenizer
@@ -196,6 +214,11 @@ def run_mrc(
     def prepare_validation_features(examples):
         # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
+
+        for i in range(len(examples)):
+            if examples[i][question_column_name][-1]!="?":
+                examples[i][question_column_name]+='?'
+
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
             examples[context_column_name if pad_on_right else question_column_name],

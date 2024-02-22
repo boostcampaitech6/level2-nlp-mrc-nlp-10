@@ -56,6 +56,9 @@ def main():
     print("Epoch : ", training_args.num_train_epochs)
     # training_args.fp16 = True
     # print(training_args.per_device_train_batch_size)
+    print()
+    #training_args.gradient_accumulation_steps=2
+    print(f"{training_args.gradient_accumulation_steps=}")
     ####################################################
     
 
@@ -147,6 +150,11 @@ def run_mrc(
     def prepare_train_features(examples):
         # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
+        for i in range(len(examples)):
+            if examples[i][question_column_name][-1]!="?":
+                examples[i][question_column_name]+='?'
+
+
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
             examples[context_column_name if pad_on_right else question_column_name],
@@ -242,6 +250,10 @@ def run_mrc(
     def prepare_validation_features(examples):
         # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
+        for i in range(len(examples)):
+            if examples[i][question_column_name][-1]!="?":
+                examples[i][question_column_name]+='?'
+                
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
             examples[context_column_name if pad_on_right else question_column_name],

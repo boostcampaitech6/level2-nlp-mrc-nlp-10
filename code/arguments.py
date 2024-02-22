@@ -9,25 +9,29 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        default="uomnf97/klue-roberta-finetuned-korquad-v2",
+        #default="klue/bert-base",
+        #default="klue/roberta-large",
+        default='uomnf97/klue-roberta-finetuned-korquad-v2',
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"
         },
     )
     config_name: Optional[str] = field(
-        default="uomnf97/klue-roberta-finetuned-korquad-v2",
+        default=None,
+        #default='uomnf97/klue-roberta-finetuned-korquad-v2',
         metadata={
             "help": "Pretrained config name or path if not the same as model_name"
         },
     )
     tokenizer_name: Optional[str] = field(
-        default="uomnf97/klue-roberta-finetuned-korquad-v2",
+        default=None,
+        #default='uomnf97/klue-roberta-finetuned-korquad-v2',
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
     retrieval_tokenizer_name: Optional[str] = field(
-        default="monologg/koelectra-base-v3-finetuned-korquad",
+        default='uomnf97/klue-roberta-finetuned-korquad-v2',
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
@@ -89,7 +93,7 @@ class DataTrainingArguments:
         default=64, metadata={"help": "Define how many clusters to use for faiss."}
     )
     top_k_retrieval: int = field(
-        default=10,
+        default=30,
         metadata={
             "help": "Define how many top-k passages to retrieve based on similarity."
         },

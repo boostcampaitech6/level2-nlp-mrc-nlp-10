@@ -5,14 +5,20 @@ import time
 import random
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union
+from collections import Counter
 
 import faiss
 import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
 from sklearn.feature_extraction.text import TfidfVectorizer
-from tqdm.auto import tqdm
+from tqdm.auto import tqdm, trange
 from rank_bm25 import BM25Okapi
+from transformers import AutoTokenizer, AutoModel, AutoConfig, AdamW, TrainingArguments, get_linear_schedule_with_warmup
+from torch.nn import functional as F
+from torch.utils.data import (DataLoader, RandomSampler, TensorDataset)
+from arguments import DataTrainingArguments, ModelArguments
+import torch
 
 seed = 2024
 random.seed(seed) # python random seed 고정
@@ -169,7 +175,7 @@ class TFIDFRetrieval:
         assert self.p_embedding is not None, "get_sparse_embedding() 메소드를 먼저 수행해줘야합니다."
 
         if isinstance(query_or_dataset, str):
-            doc_scores, doc_indices = self.get_relevant_doc(query_or_dataset, k=topk)
+            doc_scores, doc_indices = self.get_relevant_doc(query_or_dataset, k=topk)   #질문과 문서의 연관점수와 그 문서의 index반환
             print("[Search query]\n", query_or_dataset, "\n")
 
             for i in range(topk):
@@ -183,7 +189,7 @@ class TFIDFRetrieval:
             # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
             total = []
             with timer("query exhaustive search"):
-                doc_scores, doc_indices = self.get_relevant_doc_bulk(
+                doc_scores, doc_indices = self.get_relevant_doc_bulk(   #질문과 문서의 연관점수와 그 문서의 index반환
                     query_or_dataset["question"], k=topk
                 )
             for idx, example in enumerate(
@@ -252,6 +258,9 @@ class TFIDFRetrieval:
         assert (
             np.sum(query_vec) != 0
         ), "오류가 발생했습니다. 이 오류는 보통 query에 vectorizer의 vocab에 없는 단어만 존재하는 경우 발생합니다."
+
+        # print(f'{query_vec.shape=}, {self.p_embedding.T.shape=}')
+        # return
 
         result = query_vec * self.p_embedding.T
         if not isinstance(result, np.ndarray):
@@ -382,6 +391,7 @@ class TFIDFRetrieval:
 
         return D.tolist(), I.tolist()
 
+##########################################################################################################################
 
 class BM25Retrieval:
     def __init__(self, 
@@ -402,10 +412,10 @@ class BM25Retrieval:
         self.ids = list(range(len(self.contexts)))
 
         with timer('Tokenizing Context Dataset'):
-            self.tokenized_contexts = [self.tokenize_fn(context) for context in self.contexts]
+            self.tokenized_contexts = [self.tokenize_fn(context) for context in self.contexts]  
 
         with timer("Ready BM25"):
-            self.bm25 = BM25Okapi(self.tokenized_contexts)
+            self.bm25 = BM25Okapi(self.tokenized_contexts)  #위에서 토크나이즈한 문서들을 BM25 점수로 나타내는 부분
 
 
     def retrieve(
@@ -417,15 +427,17 @@ class BM25Retrieval:
         total = []
         with timer("Tokenizing Query Dataset"):
             tokenized_query = [self.tokenize_fn(query) for query in query_or_dataset['question']]
-
+            
         for idx, example in enumerate(tqdm(query_or_dataset, desc="Sparse retrieval: ")):
+            get_topk = self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk) #BM25로 TopK개의 문서를 List로 받는다.
+                #["나는 어려서부터 무언가가 . .....", "이순신은 조선의 무신으로.....", .....]   내용물들은 여러 문장들이 있는 문서들이다.
             tmp = {
                 # Query와 해당 id를 반환합니다.
                 "question": example["question"],
                 "id": example["id"],
                 # Retrieve한 Passage의 id, context를 반환합니다.
-                "context": " ".join(self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk)) if topk_acc_test == False \
-                    else "[TEST_ACC]".join(self.bm25.get_top_n(tokenized_query[idx], self.contexts, n=topk)),
+                "context": " ".join(get_topk) if topk_acc_test == False \
+                    else "[TEST_ACC]".join(get_topk),
             }
             if "context" in example.keys() and "answers" in example.keys():
                 # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
@@ -435,19 +447,431 @@ class BM25Retrieval:
         cqas = pd.DataFrame(total)
         return cqas
 
+# class Encoder(AutoModel):
+#         def __init__(self, pretrained_model_name, config):
+#             super(AutoModel, self).__init__(config)
+
+#             self.model = AutoModel.from_pretrained(pretrained_model_name)#,config)
+#             self.init_weights()
+
+#         def forward(self, input_ids,
+#                     attention_mask=None, token_type_ids=None):
+
+#             outputs = self.model(input_ids,
+#                                 attention_mask=attention_mask,
+#                                 token_type_ids=token_type_ids)
+
+#             pooled_output = outputs[1]
+
+#             return pooled_output
+
+class DenseRetrieval:
+    def __init__(self,
+        data_path: Optional[str] = "../data/",
+        context_path: Optional[str] = "wikipedia_documents.json",
+        pretrained_model_name=None):
+
+        assert pretrained_model_name, "pre_trainedmodel을 입력하세요, --model  "
+
+        # self.p_encoder=None
+        # self.q_encoder=None
+        self.data_path = data_path
+        self.encoder_trained=False
+        self.pretrained_model_name = pretrained_model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
+        self.del_model_name=pretrained_model_name[pretrained_model_name.index('/')+1:]
+
+        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+            wiki = json.load(f)
+
+        self.contexts = list(
+            dict.fromkeys([v["text"] for v in wiki.values()])
+            )
+            
+    def create_encoder(self):
+        pretrained_model_name=self.pretrained_model_name
+        self.config = AutoConfig.from_pretrained(pretrained_model_name)
+        self.p_encoder = AutoModel.from_pretrained(pretrained_model_name)
+        self.q_encoder = AutoModel.from_pretrained(pretrained_model_name)
+
+        if torch.cuda.is_available():
+            self.p_encoder.cuda()
+            self.q_encoder.cuda()
+
+
+    def encoders_train(self, args, dataset, overflow_mapping):
+        assert self.p_encoder and self.q_encoder, "인코더를 생성하세요. \"create_encoder(pretrained_model_name)\""
+
+        self.q_model_dir = f"{self.pretrained_model_name}_q_model.pt"
+        self.p_model_dir = f"{self.pretrained_model_name}_p_model.pt"
+        q_model_dir=self.q_model_dir
+        p_model = self.p_encoder
+        q_model = self.q_encoder
+        data_args=DataTrainingArguments
+        
+        train_sampler = RandomSampler(dataset)
+        train_dataloader = DataLoader(dataset, sampler=train_sampler, batch_size=args.per_device_train_batch_size)
+        
+        no_decay = ['bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+                {'params': [p for n, p in p_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+                {'params': [p for n, p in p_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0},
+                {'params': [p for n, p in q_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+                {'params': [p for n, p in q_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+                ]
+
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+        
+        t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
+
+        # self.context_ids = self.tokenizer(self.contexts, max_length = data_args.max_seq_length, padding="max_length", return_tensors='pt',
+        #                 truncation=True, stride = data_args.doc_stride, return_overflowing_tokens=True, 
+        #                 return_token_type_ids=False)['overflow_to_sample_mapping'].to("cuda")
+
+        # Start training!
+        print(f'\n!!!!!!!!!!!!!Train Start!!!!!!!!!!!!!!!!\n')
+        global_step = 0
+
+        p_model.zero_grad()
+        q_model.zero_grad()
+        torch.cuda.empty_cache()
+
+        train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
+
+        for _ in train_iterator:    #epoch
+            epoch_iterator = tqdm(train_dataloader, desc="Iteration")
+
+            for step, batch in enumerate(epoch_iterator):   #batch가 train loader에서 batch_size만큼씩 받은 데이터
+                q_model.train()
+                p_model.train()
+                len_batch = args.per_device_train_batch_size
+
+                if torch.cuda.is_available():
+                    batch = tuple(t.cuda() for t in batch)
+
+                curr_contexts_ids = batch[6]
+
+                self.p_inputs = {
+                            'input_ids': batch[0],
+                            'attention_mask': batch[1],
+                            'token_type_ids': batch[2]
+                            }
+
+                q_inputs = {
+                            'input_ids': batch[3],
+                            'attention_mask': batch[4],
+                            'token_type_ids': batch[5]
+                            }
+
+                p_inputs = self.p_inputs
+                
+                p_outputs = p_model(**p_inputs)['pooler_output']  # (batch_size, emb_dim)
+                q_outputs = q_model(**q_inputs)['pooler_output']  # (batch_size, emb_dim)
+
+                # Calculate similarity score & loss
+                sim_scores = torch.matmul(q_outputs, torch.transpose(p_outputs, 0, 1))  # (batch_size, emb_dim) x (emb_dim, batch_size) = (batch_size, batch_size)
+                #targets = torch.arange(0, args.per_device_train_batch_size).long()
+                #[0,1,2,3]  [4,5,5,6]
+                count = Counter([id.item() for id in curr_contexts_ids])   #ex) [2,1,1,2] => {2:2, 1:2}
+                targets = []
+                # for idx, n in count.items():
+                #     start_idx = len(targets)
+                #     val=1/n
+                #     target = [0]*args.per_device_train_batch_size
+                #     target[start_idx:start_idx+n]=[val]*n
+                #     for _ in range(n):
+                #         targets.append(target)
+                # print(count)
+                for i in range(args.per_device_train_batch_size):
+                    target = [0]*args.per_device_train_batch_size
+                    curr_contexts_id = curr_contexts_ids[i]
+                    # print(curr_contexts_id)
+                    # print(count[curr_contexts_id.item()])
+                    # print()
+                    val = 1/count[curr_contexts_id.item()]
+                    for j in range(args.per_device_train_batch_size):
+                        if curr_contexts_id == curr_contexts_ids[j]:
+                            target[j]=val
+                    
+                    targets.append(target)
+
+                targets = torch.tensor(targets).to("cuda")  #batch X batch
+                # print(curr_contexts_ids)
+                # for i in range(len(targets)):
+                #     print(targets[i])
+
+                # print("\n\n\n")
+                
+                sim_scores = -F.log_softmax(sim_scores, dim=1)
+                loss = torch.sum(targets*sim_scores)/args.per_device_train_batch_size
+                # loss = F.nll_loss(sim_scores, targets.to('cuda'))
+
+                if step%50==0:
+                    print(f' Loss : {loss}')
+
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                q_model.zero_grad()
+                p_model.zero_grad()
+                global_step += 1
+
+        print(f'\n!!!!!!!!!!!!!Train Finish!!!!!!!!!!!!!!!!\n')
+        self.encoder_trained=True
+        self.p_encoder, self.q_encoder = p_model, q_model
+
+        del_model_name=self.q_model_dir[self.q_model_dir.index('/')+1:]
+        torch.save(self.q_encoder, f'./models/Dense/{del_model_name}')
+        torch.save(self.p_encoder, f'./models/Dense/{del_model_name}')
+        print(f'\n!!!!!!!!!!!!!Model Save!!!!!!!!!!!!!!!!\n')
+
+    def get_dense_embeddings(self):
+        file_name = 'Dense/p_dense_embedding.bin'
+        file_path = os.path.join(self.data_path, file_name)
+        del_model_name=self.pretrained_model_name[self.pretrained_model_name.index('/')+1:]
+
+        if os.path.isfile(file_path):
+            with open(file_path, "rb") as f:
+                self.p_embedding = pickle.load(f)
+            with open(self.data_path+"/Dense/context_ids.bin", "rb") as f:            
+                self.context_ids = pickle.load(f)
+
+            print("\nEmbedding load!\n")
+            self.q_encoder = torch.load(f'./models/Dense/{self.del_model_name}_q_model.pt').to("cuda")
+
+        else:
+            if os.path.isfile(f'./models/Dense/{self.pretrained_model_name}_q_model.pt') and os.path.isfile(f'./models/Dense/{self.pretrained_model_name}_p_model.pt'):
+                self.p_encoder = torch.load(f'./models/Dense/{del_model_name}_p_model.pt').to("cuda")
+                self.q_encoder = torch.load(f'./models/Dense/{del_model_name}_q_model.pt').to("cuda")
+                print("\nEncoder load!\n")
+
+            else:
+                data_args=DataTrainingArguments
+                datasets = load_from_disk("../data/train_dataset")
+                training_dataset = datasets['train']
+
+                p_seqs = self.tokenizer(
+                    training_dataset['context'], 
+                    max_length = data_args.max_seq_length,
+                    padding="max_length", 
+                    return_tensors='pt',
+                    truncation=True,
+                    stride = data_args.doc_stride,
+                    return_overflowing_tokens=True,
+                    #return_token_type_ids=False,
+                    )
+
+                #print(p_seqs["overflow_to_sample_mapping"][29:36])
+                self.overflow_mapping = p_seqs["overflow_to_sample_mapping"]
+                new_q = [training_dataset['question'][i] for i in tqdm(p_seqs["overflow_to_sample_mapping"], desc="matching Q&P")]  #query들을 문서에 맞게 추가해줌
+                #print(new_q[29:36])
+
+                q_seqs = self.tokenizer(
+                    new_q,
+                    max_length = data_args.max_seq_length,
+                    padding="max_length",
+                    return_tensors='pt', 
+                    truncation=True, 
+                    stride = data_args.doc_stride,
+                    #return_overflowing_tokens=True,
+                    #return_token_type_ids=False,
+                    )
+
+                self.train_dataset = TensorDataset(p_seqs['input_ids'], p_seqs['attention_mask'], p_seqs['token_type_ids'], 
+                                    q_seqs['input_ids'], q_seqs['attention_mask'], q_seqs['token_type_ids'], self.overflow_mapping)
+                
+                self.create_encoder()
+                args = TrainingArguments(
+                output_dir="dense_retireval",
+                evaluation_strategy="epoch",
+                learning_rate=2e-5,
+                per_device_train_batch_size=6,
+                per_device_eval_batch_size=6,
+                num_train_epochs=3,
+                weight_decay=0.01
+                )
+                print("\nencoders_training!\n")
+                self.encoders_train(args, self.train_dataset, self.overflow_mapping)
+                
+            # p_tokens = self.tokenizer(
+            #     self.contexts, 
+            #     max_length = data_args.max_seq_length,
+            #     padding="max_length", 
+            #     return_tensors='pt',
+            #     truncation=True,
+            #     stride = data_args.doc_stride,
+            #     return_overflowing_tokens=True,
+            #     #return_token_type_ids=False,
+            #     )
+
+            # self.context_ids = p_tokens.pop('overflow_to_sample_mapping')
+            # p_tokens.to("cuda")###################요기가 아무래도 문제인듯?
+
+            # self.p_embedding = self.p_encoder(**p_tokens)['pooler_output'].to("cpu")
+            with torch.no_grad():
+                self.p_encoder.eval()
+                self.q_encoder.eval()
+
+                self.p_embedding = []
+                self.context_ids = []
+                for i in trange(len(self.contexts), desc="making p_embedding"):
+                    p = self.tokenizer(self.contexts[i], max_length = data_args.max_seq_length, padding="max_length", return_tensors='pt',
+                        truncation=True, stride = data_args.doc_stride, return_overflowing_tokens=True,
+                        return_token_type_ids=False,
+                        ).to("cuda")
+                    
+                    context_ids = p.pop('overflow_to_sample_mapping').to("cpu")
+                    p_emb=self.p_encoder(**p)['pooler_output'].to("cpu").numpy()
+
+                    # print(len(self.tokenizer.tokenize(self.contexts[i])),"!!!")
+                    # print(f'{context_ids}')
+                    
+                    self.p_embedding.extend(p_emb)
+                    self.context_ids.extend([i for _ in range(len(context_ids))])
+
+            self.p_embedding = torch.tensor(self.p_embedding).squeeze()
+            self.context_ids = torch.tensor(self.context_ids).squeeze()
+            print(f'\n{self.p_embedding.shape=}')
+            print(f'\n{self.context_ids.shape=}')
+
+            print("\n!!!!!!!!!!p_embed!!!!!!!!!!!\n")
+            #print(p_tokens.keys())
+            self.p_encoder.to("cpu")
+            self.q_encoder.to("cuda")
+            
+            with open(file_path, "wb") as f:
+                pickle.dump(self.p_embedding, f)
+            
+            with open(self.data_path+"/Dense/context_ids.bin", "wb") as f:
+                pickle.dump(self.context_ids, f)
+            
+            print("\nEmbedding Save!\n")
+        
+        self.p_embedding
+        self.context_ids.to("cuda")
+
+        #테스트!!!!!!!!!!!!!!!!!!
+        
+        print(f'\nTest Start!!!!!!!!!!\n')
+        datasets = load_from_disk("../data/train_dataset")
+        training_dataset = datasets['train']
+        for i in random.sample(range(3000), 10):
+            q = self.tokenizer(training_dataset[i]['question'], max_length = 512, padding="max_length", return_tensors='pt',
+                truncation=True, stride = 128, return_overflowing_tokens=False,
+                return_token_type_ids=False,
+                ).to("cuda")
+            
+            q_embedding = self.q_encoder(**q)['pooler_output'].to("cuda")
+            score = torch.matmul(q_embedding, self.p_embedding.T.to("cuda")).squeeze()
+
+            indice = torch.argsort(score, dim=-1).to("cpu")
+            print(f"{indice.shape=}")
+            indice = indice.tolist()
+
+            print(f"\n question : {training_dataset[i]['question']}")
+            print(f" ground_truth : {training_dataset[i]['context']}")
+            print(f"\n TopK : ")
+            for i in range(10):
+                print(" ", self.contexts[self.context_ids[indice[i]]][:50])
+            print()
+        
+        #테스트!!!!!!!!!!!!!!!!!!
+    
+    def retrieve(
+        self, query_or_dataset, topk: Optional[int] = 1, topk_acc_test: bool = False):
+        """
+        Arguments:
+            query_or_dataset (Union[str, Dataset]):
+                str이나 Dataset으로 이루어진 Query를 받습니다.
+                str 형태인 하나의 query만 받으면 `get_relevant_doc`을 통해 유사도를 구합니다.
+                Dataset 형태는 query를 포함한 HF.Dataset을 받습니다.
+                이 경우 `get_relevant_doc_bulk`를 통해 유사도를 구합니다.
+            topk (Optional[int], optional): Defaults to 1.
+                상위 몇 개의 passage를 사용할 것인지 지정합니다.
+
+        Returns:
+            1개의 Query를 받는 경우  -> Tuple(List, List)
+            다수의 Query를 받는 경우 -> pd.DataFrame: [description]
+
+        Note:
+            다수의 Query를 받는 경우,
+                Ground Truth가 있는 Query (train/valid) -> 기존 Ground Truth Passage를 같이 반환합니다.
+                Ground Truth가 없는 Query (test) -> Retrieval한 Passage만 반환합니다.
+        """
+        self.get_dense_embeddings()
+        data_args=DataTrainingArguments
+        
+        # with open(self.data_path+"/Dense/context_ids.bin", "rb") as f:
+        #     self.context_ids = pickle.load(f)
+
+        assert self.p_embedding is not None, "get_sparse_embedding() 메소드를 먼저 수행해줘야합니다."
+        
+        if isinstance(query_or_dataset, Dataset):
+
+            # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
+            total = []
+            with timer("query exhaustive search"):
+                # doc_scores, doc_indices = self.get_relevant_doc_bulk(   #질문과 문서의 연관점수와 그 문서의 index반환
+                #     query_or_dataset["question"], k=topk)
+
+                with torch.no_grad():
+                    self.q_encoder.eval()
+
+                    query_embed=[]
+                    for i in trange(len(query_or_dataset["question"]), desc = "making query_embedding"):
+                        q = self.tokenizer(query_or_dataset["question"][i], max_length = data_args.max_seq_length, padding="max_length", return_tensors='pt',
+                            truncation=True, stride = data_args.doc_stride, return_overflowing_tokens=True,
+                            return_token_type_ids=False, 
+                            ).to("cuda")
+                        
+                        q_ids = q.pop('overflow_to_sample_mapping').to("cpu")
+                        q_emb = self.q_encoder(**q)['pooler_output'].to("cpu").numpy()
+                        query_embed.extend(q_emb)
+
+                query_embed = torch.tensor(query_embed).squeeze()
+                doc_scores = torch.matmul(query_embed, self.p_embedding.T.to("cpu"))
+                print(f'\n!!!!score_shape : {doc_scores.shape}!!!!!\n')
+                indices = torch.argsort(doc_scores, dim=-1, descending=True).squeeze().tolist()
+                doc_indices = [list(set([self.context_ids[i] for i in row_indices[:topk]])) for row_indices in indices]    #context의 index로 바꾸기   
+                print(f'\n{topk=}doc_indices shape : [{len(doc_indices)}, {len(doc_indices[0])}]!!!!!\n')
+
+            for idx, example in enumerate(
+                tqdm(query_or_dataset, desc="Sparse retrieval: ")
+            ):
+                tmp = {
+                    # Query와 해당 id를 반환합니다.
+                    "question": example["question"],
+                    "id": example["id"],
+                    # Retrieve한 Passage의 id, context를 반환합니다.
+                    "context": " ".join([self.contexts[pid] for pid in doc_indices[idx]]) if topk_acc_test == False \
+                        else "[TEST_ACC]".join([self.contexts[pid] for pid in doc_indices[idx]]),
+                }
+                if "context" in example.keys() and "answers" in example.keys():
+                    # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
+                    tmp["original_context"] = example["context"]
+                    tmp["answers"] = example["answers"]
+                total.append(tmp)
+
+            cqas = pd.DataFrame(total)
+            return cqas
+    
+
+##########################################################################################################################
 
 if __name__ == "__main__":
 
     import argparse
+    print("\n", "!!!!!retrieval start!!!!!\n")
 
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
         "--dataset_name", default="../data/train_dataset", metavar="../data/train_dataset", type=str, help=""
     )
-    parser.add_argument(
+    parser.add_argument(    ############토크나이저 바꾸는곳
         "--model_name_or_path",
-        default="monologg/koelectra-base-v3-finetuned-korquad", 
-        metavar="monologg/koelectra-base-v3-finetuned-korquad",
+        default= ModelArguments.retrieval_tokenizer_name, #tokenizer name
+        metavar="pretrained Model",
         type=str,
         help="",
     )
@@ -458,10 +882,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_faiss", default=False, metavar=False, type=bool, help="")
     
     # Add argparser for Top-k Test
-    parser.add_argument("--topk", default=10, metavar=10, type=int, help='topk')
-    parser.add_argument("--method", default="BM25", metavar="BM25", type=str, help='Retrieval Method, BM25, TF-IDF')
+    
+    ######################################################
+    #parser.add_argument("--model", default='uomnf97/klue-roberta-finetuned-korquad-v2', metavar="pretrained_model_name", type=str, help='dense의 tokenizer')
+    parser.add_argument("--topk", default=20, metavar=10, type=int, help='topk')
+    parser.add_argument("--method", default="BM25", metavar="BM25", type=str, help='Retrieval Method, BM25, TF-IDF, Dense')
     parser.add_argument("--test", default=True, metavar=False, type=bool, help='topk acc test')
-
+    ######################################################
+    
     args = parser.parse_args()
 
     # Test sparse
@@ -475,10 +903,8 @@ if __name__ == "__main__":
     print("*" * 40, "query dataset", "*" * 40)
     print(full_ds)
 
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False,)
-    assert args.method in ['BM25', 'TF-IDF'], "Check retrieval method in ['BM25', 'TF-IDF']"
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False,) #???????????????????????????????????????
+    assert args.method in ['BM25', 'TF-IDF', 'Dense'], "Check retrieval method in ['BM25', 'TF-IDF', 'Dense']"
 
     if args.method == 'TF-IDF':
         retriever = TFIDFRetrieval(
@@ -493,6 +919,13 @@ if __name__ == "__main__":
             tokenize_fn=tokenizer.tokenize,
             data_path=args.data_path,
             context_path=args.context_path
+        )
+    
+    elif args.method == 'Dense':
+        retriever = DenseRetrieval(
+            data_path=args.data_path,
+            context_path=args.context_path,
+            pretrained_model_name=args.model_name_or_path
         )
     
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
@@ -545,11 +978,16 @@ if __name__ == "__main__":
                                     break
                             pbar.set_description(f'Top-{args.topk} ACC: {correct_cnt/(i+1)}, correct: {correct_cnt}, check: {i+1}')
 
-
-
-            
-        
-                
-
-            
-
+                elif args.method == 'Dense':
+                    df = retriever.retrieve(query_or_dataset=full_ds, topk = args.topk, topk_acc_test=args.test)
+                    
+                    correct_cnt = 0
+                    pbar = tqdm(range(len(df)))
+                    
+                    for i in pbar:
+                        original_context = df.iloc[i, 3]
+                        for retrieval_context in df.iloc[i, 2].split('[TEST_ACC]'):#########
+                            if original_context == retrieval_context:
+                                correct_cnt += 1
+                                break
+                        pbar.set_description(f'Method:{args.method}, Top-{args.topk} ACC: {correct_cnt/(i+1)}, correct: {correct_cnt}, check: {i+1}')
