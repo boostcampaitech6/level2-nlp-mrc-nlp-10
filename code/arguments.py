@@ -32,6 +32,16 @@ class ModelArguments:
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
+    model_for_generation: str = field(
+        #default="paust/pko-t5-base-finetuned-korquad",
+        default="paust/pko-flan-t5-large",
+        metadata={
+            "help": "Path to pretrained model or model identifier from huggingface.co/models"
+        },
+    )
+    use_extraction: bool = field(
+        default=False, metadata={'help': "Whether to extract or generate"}
+    )
 
 
 
