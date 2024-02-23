@@ -50,15 +50,16 @@ def main():
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
     ####################################################
-    training_args.per_device_train_batch_size=15
-    training_args.per_device_eval_batch_size=15
+    training_args.per_device_train_batch_size=8
+    training_args.per_device_eval_batch_size=8
     print("batch_size : ", training_args.per_device_train_batch_size)
     print("Epoch : ", training_args.num_train_epochs)
     # training_args.fp16 = True
     # print(training_args.per_device_train_batch_size)
     print()
-    #training_args.gradient_accumulation_steps=2
+    training_args.gradient_accumulation_steps=2
     print(f"{training_args.gradient_accumulation_steps=}")
+    training_args.learning_rate=5e-6
     ####################################################
     
 
@@ -151,8 +152,8 @@ def run_mrc(
         # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
         for i in range(len(examples)):
-            if examples[i][question_column_name][-1]!="?":
-                examples[i][question_column_name]+='?'
+            if examples[question_column_name][i][-1]!="?":
+                examples[question_column_name][i][-1]+='?'
 
 
         tokenized_examples = tokenizer(
@@ -251,9 +252,9 @@ def run_mrc(
         # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
         for i in range(len(examples)):
-            if examples[i][question_column_name][-1]!="?":
-                examples[i][question_column_name]+='?'
-                
+            if examples[question_column_name][i][-1]!="?":
+                examples[question_column_name][i][-1]+='?'
+
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
             examples[context_column_name if pad_on_right else question_column_name],

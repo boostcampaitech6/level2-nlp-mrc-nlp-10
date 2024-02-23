@@ -31,6 +31,7 @@ class ModelArguments:
         },
     )
     retrieval_tokenizer_name: Optional[str] = field(
+        #default='monologg/koelectra-base-v3-discriminator',
         default='uomnf97/klue-roberta-finetuned-korquad-v2',
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
@@ -93,7 +94,7 @@ class DataTrainingArguments:
         default=64, metadata={"help": "Define how many clusters to use for faiss."}
     )
     top_k_retrieval: int = field(
-        default=30,
+        default=10,
         metadata={
             "help": "Define how many top-k passages to retrieve based on similarity."
         },

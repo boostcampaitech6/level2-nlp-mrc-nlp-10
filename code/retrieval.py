@@ -566,8 +566,8 @@ class DenseRetrieval:
 
                 p_inputs = self.p_inputs
                 
-                p_outputs = p_model(**p_inputs)['pooler_output']  # (batch_size, emb_dim)
-                q_outputs = q_model(**q_inputs)['pooler_output']  # (batch_size, emb_dim)
+                p_outputs = p_model(**p_inputs)['pooler_output'].squeeze()  # (batch_size, emb_dim)
+                q_outputs = q_model(**q_inputs)['pooler_output'].squeeze()  # (batch_size, emb_dim)
 
                 # Calculate similarity score & loss
                 sim_scores = torch.matmul(q_outputs, torch.transpose(p_outputs, 0, 1))  # (batch_size, emb_dim) x (emb_dim, batch_size) = (batch_size, batch_size)
@@ -662,10 +662,10 @@ class DenseRetrieval:
                     #return_token_type_ids=False,
                     )
 
-                #print(p_seqs["overflow_to_sample_mapping"][29:36])
+                print(p_seqs["overflow_to_sample_mapping"][29:36])
                 self.overflow_mapping = p_seqs["overflow_to_sample_mapping"]
                 new_q = [training_dataset['question'][i] for i in tqdm(p_seqs["overflow_to_sample_mapping"], desc="matching Q&P")]  #query들을 문서에 맞게 추가해줌
-                #print(new_q[29:36])
+                print(new_q[29:36])
 
                 q_seqs = self.tokenizer(
                     new_q,
@@ -752,7 +752,7 @@ class DenseRetrieval:
         self.context_ids.to("cuda")
 
         #테스트!!!!!!!!!!!!!!!!!!
-        
+
         print(f'\nTest Start!!!!!!!!!!\n')
         datasets = load_from_disk("../data/train_dataset")
         training_dataset = datasets['train']
@@ -885,7 +885,7 @@ if __name__ == "__main__":
     
     ######################################################
     #parser.add_argument("--model", default='uomnf97/klue-roberta-finetuned-korquad-v2', metavar="pretrained_model_name", type=str, help='dense의 tokenizer')
-    parser.add_argument("--topk", default=20, metavar=10, type=int, help='topk')
+    parser.add_argument("--topk", default=10, metavar=10, type=int, help='topk')
     parser.add_argument("--method", default="BM25", metavar="BM25", type=str, help='Retrieval Method, BM25, TF-IDF, Dense')
     parser.add_argument("--test", default=True, metavar=False, type=bool, help='topk acc test')
     ######################################################

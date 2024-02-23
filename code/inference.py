@@ -216,8 +216,8 @@ def run_mrc(
         # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
 
         for i in range(len(examples)):
-            if examples[i][question_column_name][-1]!="?":
-                examples[i][question_column_name]+='?'
+            if examples[question_column_name][i][-1]!="?":
+                examples[question_column_name][i][-1]+='?'
 
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
