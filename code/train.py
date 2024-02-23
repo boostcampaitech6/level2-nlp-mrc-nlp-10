@@ -53,10 +53,15 @@ def main():
     print(model_args.model_name_or_path)
     
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
-    training_args.per_device_train_batch_size = 15
-    training_args.per_device_eval_batch_size = 15
+    ####################################################
+    training_args.per_device_train_batch_size=15
+    training_args.per_device_eval_batch_size=15
+    print("batch_size : ", training_args.per_device_train_batch_size)
+    print("Epoch : ", training_args.num_train_epochs)
     # training_args.fp16 = True
     # print(training_args.per_device_train_batch_size)
+    ####################################################
+    
 
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
@@ -73,7 +78,9 @@ def main():
 
     # 모델을 초기화하기 전에 난수를 고정합니다.
     set_seed(training_args.seed)
+    
     datasets = load_from_disk(data_args.dataset_name)
+    print("\ndatasets : ")
     print(datasets)
 
     if model_args.use_extraction:
@@ -169,13 +176,13 @@ def run_mrc_extract(
     else:
         column_names = datasets["validation"].column_names
 
-    question_column_name = "question" if "question" in column_names else column_names[0]
-    context_column_name = "context" if "context" in column_names else column_names[1]
-    answer_column_name = "answers" if "answers" in column_names else column_names[2]
+    question_column_name = "question" if "question" in column_names else column_names[0]    #질문
+    context_column_name = "context" if "context" in column_names else column_names[1]   #본문
+    answer_column_name = "answers" if "answers" in column_names else column_names[2]    #{answer_start : , text : } 형태
 
     # Padding에 대한 옵션을 설정합니다.
     # (question|context) 혹은 (context|question)로 세팅 가능합니다.
-    pad_on_right = tokenizer.padding_side == "right"
+    pad_on_right = tokenizer.padding_side == "right"    #tokenizer.padding_side가 "right"라면 pad_on_right가 True값이 되는 구조
 
     # 오류가 있는지 확인합니다.
     last_checkpoint, max_seq_length = check_no_error(
@@ -189,14 +196,15 @@ def run_mrc_extract(
         tokenized_examples = tokenizer(
             examples[question_column_name if pad_on_right else context_column_name],
             examples[context_column_name if pad_on_right else question_column_name],
-            truncation="only_second" if pad_on_right else "only_first",
+            truncation="only_second" if pad_on_right else "only_first", #질문과 문서 중 문서에서 짜르기
             max_length=max_seq_length,
-            stride=data_args.doc_stride,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=True,
+            stride=data_args.doc_stride,    #짜른 문서에서 겹치는 부분 수
+            return_overflowing_tokens=True, #문서가 짤리면 같은 문서끼리는 같은 숫자 반환 ex)[0,0,1,2,3,3]  0번문ㄴ서 3번문서가 길어서 짤린것
+            return_offsets_mapping=True,    #토큰화 된 입력값의 문자단위의 위치끼리 묶어줌/ CLS토큰은 (0,0), 그다음 토큰이 3글자토큰이면 (0,3)
             return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
+        #{"input_dis" : [....], "Attention_Mask" : [.....], "offset_mapping":[(0,0), (1,4),.....], "overflow_to_sample_mapping" : [0,0,1,2,2,3,...] }
 
         # 길이가 긴 context가 등장할 경우 truncate를 진행해야하므로, 해당 데이터셋을 찾을 수 있도록 mapping 가능한 값이 필요합니다.
         sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
@@ -208,16 +216,17 @@ def run_mrc_extract(
         tokenized_examples["start_positions"] = []
         tokenized_examples["end_positions"] = []
 
-        for i, offsets in enumerate(offset_mapping):
+        for i, offsets in enumerate(offset_mapping):    #offsets는 위의 토큰화한 문서1개당 1개의 list로 반환되므로 i는 몇번째 문서인지, offsets는 그 문서에서 token의 글자수에 따른 위치
             input_ids = tokenized_examples["input_ids"][i]
-            cls_index = input_ids.index(tokenizer.cls_token_id)  # cls index
+            cls_index = input_ids.index(tokenizer.cls_token_id)  # cls index, 제일 앞에있어서 0
 
             # sequence id를 설정합니다 (to know what is the context and what is the question).
-            sequence_ids = tokenized_examples.sequence_ids(i)
+            sequence_ids = tokenized_examples.sequence_ids(i)   #token_type_ids랑 똑같음. i번쨰 문서에서 질문과 문ㄴ서 구문
 
             # 하나의 example이 여러개의 span을 가질 수 있습니다.
-            sample_index = sample_mapping[i]
-            answers = examples[answer_column_name][sample_index]
+            sample_index = sample_mapping[i]    #몇번째 문서인지(짤렸을때 짤린문서라는거 표시) [0,0,1,2,2,3] =>0번ㄴ과 2번 문서 짤린문서로 저장했단 뜻
+            answers = examples[answer_column_name][sample_index]    #examples는 질문, 문서set / 이 데이터셋에서 answer_column_name은 "answer"
+            #위의[0,0,1,2,2,3]의 예에서 첫번쨰 두번쨰 문서는 0번 질문 문서 세트인데 이 세트에서의 answer을 받기 위한것
 
             # answer가 없을 경우 cls_index를 answer로 설정합니다(== example에서 정답이 없는 경우 존재할 수 있음).
             if len(answers["answer_start"]) == 0:
@@ -230,22 +239,23 @@ def run_mrc_extract(
 
                 # text에서 current span의 Start token index
                 token_start_index = 0
-                while sequence_ids[token_start_index] != (1 if pad_on_right else 0):
-                    token_start_index += 1
-
+                while sequence_ids[token_start_index] != (1 if pad_on_right else 0):    #sequence_ids(=token_type_ids)에서 1은 [SEP]뒤 즉, 문서를 뜻함
+                    token_start_index += 1  
+                    #질문 문서 인풋에서 문서의 시작점
                 # text에서 current span의 End token index
                 token_end_index = len(input_ids) - 1
                 while sequence_ids[token_end_index] != (1 if pad_on_right else 0):
                     token_end_index -= 1
+                     #질문 문서 인풋에서 문서의 끝점
 
                 # 정답이 span을 벗어났는지 확인합니다(정답이 없는 경우 CLS index로 label되어있음).
                 if not (
                     offsets[token_start_index][0] <= start_char
                     and offsets[token_end_index][1] >= end_char
-                ):
+                ):  #정답의 시작위치(문자1개씩 기준)와 끝위치가 문서의 시작과 끝 사이에 있지 않다면
                     tokenized_examples["start_positions"].append(cls_index)
                     tokenized_examples["end_positions"].append(cls_index)
-                else:
+                else:   #문서 안에 있으면
                     # token_start_index 및 token_end_index를 answer의 끝으로 이동합니다.
                     # Note: answer가 마지막 단어인 경우 last offset을 따라갈 수 있습니다(edge case).
                     while (
